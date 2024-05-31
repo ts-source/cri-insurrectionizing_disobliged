@@ -1,0 +1,220 @@
+name: eins4/sub1/azure
+on:
+  push:
+  workflow_dispatch:
+concurrency:
+  group: "${{ github.ref }}"
+  cancel-in-progress: true
+jobs:
+  extract-script:
+    runs-on: ubuntu-latest
+    container:
+      image: "$TBC_EXTRACT_IMAGE"
+    if: ${{ github.actions }}_FILES
+    timeout-minutes: 60
+    env:
+      GITLAB_CI_FILES: templates/gitlab-ci-azure.yml
+      BASH_SHELLCHECK_FILES: "*.sh"
+    steps:
+    - uses: actions/checkout@v4.1.0
+      with:
+        fetch-depth: 20
+        lfs: true
+    - run: echo "#!/bin/bash" > script.sh
+    - run: sed -n '/BEGSCRIPT/,/ENDSCRIPT/p' "${{ github.actions }}_FILES" | sed 's/^  //' >> script.sh
+    - run: export LC_ALL=C.UTF-8
+    - uses: actions/upload-artifact@v4.1.0
+      if: always()
+      with:
+        name: "${{ github.job }}"
+        retention-days: 1
+        path: script.sh
+  gitlab-ci-lint:
+    needs: extract-script
+    runs-on: ubuntu-latest
+    container:
+      image: registry.hub.docker.com/badouralix/curl-jq:latest
+    if: ($GITLAB_TOKEN != null && $GITLAB_TOKEN != "") && ${{ github.actions }}_FILES
+    timeout-minutes: 60
+    env:
+      GITLAB_CI_FILES: templates/gitlab-ci-azure.yml
+      BASH_SHELLCHECK_FILES: "*.sh"
+    steps:
+    - uses: actions/checkout@v4.1.0
+      with:
+        fetch-depth: 20
+        lfs: true
+    - uses: actions/download-artifact@v4.1.0
+    - run: |
+        set -e
+        function log_info() {
+          echo -e "[\e[1;94mINFO\e[0m] $*"
+        }
+        function log_warn() {
+          echo -e "[\\e[1;93mWARN\\e[0m] $*"
+        }
+        function log_error() {
+          echo -e "[\e[1;91mERROR\e[0m] $*" >&2
+        }
+        function install_ca_certs() {
+          certs=$1
+          if [[ -z "$certs" ]]
+          then
+            return
+          fi
+          # import in system
+          if echo "$certs" >> /etc/ssl/certs/ca-certificates.crt
+          then
+            log_info "CA certificates imported in \\e[33;1m/etc/ssl/certs/ca-certificates.crt\\e[0m"
+          fi
+          if echo "$certs" >> /etc/ssl/cert.pem
+          then
+            log_info "CA certificates imported in \\e[33;1m/etc/ssl/cert.pem\\e[0m"
+          fi
+        }
+        # validates an input GitLab CI YAML file
+        function ci_lint() {
+          rc=0
+          for file in $(eval "ls -1 ${{ github.actions }}_FILES")
+          do
+            log_info "Validating: $file..."
+            cilint_req="{\"content\": $(jq --raw-input --slurp '.'  < "${file:-/dev/stdin}")}"
+            cilint_resp=$(curl -s --header "Content-Type: application/json" --header "PRIVATE-TOKEN: $GITLAB_TOKEN" ${{ github.api_url }}/projects/${{ github.repository }}/ci/lint --data "$cilint_req")
+            if [ "$(echo "$cilint_resp" | jq -r '.valid')" == "true" ]
+            then
+              log_info " ... valid"
+            else
+              log_error " ... invalid"
+              echo "$cilint_resp" | jq
+              rc=1
+            fi
+          done
+          exit $rc
+        }
+    - run: install_ca_certs "${CUSTOM_CA_CERTS:-$DEFAULT_CA_CERTS}"
+    - run: ci_lint
+  check-links:
+    needs: extract-script
+    runs-on: ubuntu-latest
+    container:
+      image: lycheeverse/lychee:latest
+      options: "--entrypoint "
+    timeout-minutes: 60
+    env:
+      GITLAB_CI_FILES: templates/gitlab-ci-azure.yml
+      BASH_SHELLCHECK_FILES: "*.sh"
+    steps:
+    - uses: actions/checkout@v4.1.0
+      with:
+        fetch-depth: 20
+        lfs: true
+    - uses: actions/download-artifact@v4.1.0
+    - run: lychee --exclude www.gnu.org --exclude-path CHANGELOG.md --exclude-path SECURITY.md $LYCHEE_EXTRA_OPTS *.md
+  tbc-check:
+    needs: extract-script
+    runs-on: ubuntu-latest
+    container:
+      image: registry.gitlab.com/to-be-continuous/tools/tbc-check:latest
+      options: "--entrypoint "
+    if: # Unable to map conditional expression to GitHub Actions equivalent
+    timeout-minutes: 60
+    env:
+      GITLAB_CI_FILES: templates/gitlab-ci-azure.yml
+      BASH_SHELLCHECK_FILES: "*.sh"
+    steps:
+    - uses: actions/checkout@v4.1.0
+      with:
+        fetch-depth: 20
+        lfs: true
+    - uses: actions/download-artifact@v4.1.0
+    - run: tbc-check .
+  kicker-validation:
+    needs: extract-script
+    runs-on: ubuntu-latest
+    container:
+      image: "${YAJSV_IMAGE}"
+    if: # Unable to map conditional expression to GitHub Actions equivalent
+    timeout-minutes: 60
+    env:
+      GITLAB_CI_FILES: templates/gitlab-ci-azure.yml
+      BASH_SHELLCHECK_FILES: "*.sh"
+      JSON_FILE: kicker.json
+      SCHEMA_URL: "${{ github.api_url }}/projects/to-be-continuous%2Fkicker/repository/files/kicker-schema-1.json/raw?ref=master"
+    steps:
+    - uses: actions/checkout@v4.1.0
+      with:
+        fetch-depth: 20
+        lfs: true
+    - uses: actions/download-artifact@v4.1.0
+    - run: |
+        set -e
+        function log_info() {
+           echo -e "[\e[1;94mINFO\e[0m] $*"
+        }
+        function log_error() {
+         echo -e "[\e[1;91mERROR\e[0m] $*" >&2
+        }
+        function install_ca_certs() {
+          certs=$1
+          if [[ -z "$certs" ]]
+          then
+            return
+          fi
+          # import in system
+          if echo "$certs" >> /etc/ssl/certs/ca-certificates.crt
+          then
+            log_info "CA certificates imported in \\e[33;1m/etc/ssl/certs/ca-certificates.crt\\e[0m"
+          fi
+          if echo "$certs" >> /etc/ssl/cert.pem
+          then
+            log_info "CA certificates imported in \\e[33;1m/etc/ssl/cert.pem\\e[0m"
+          fi
+        }
+    - run: install_ca_certs "${CUSTOM_CA_CERTS:-$DEFAULT_CA_CERTS}"
+    - run: 'wget --header "PRIVATE-TOKEN: $GITLAB_TOKEN" "$SCHEMA_URL" -O schema.json'
+    - run: yajsv -s schema.json "$JSON_FILE"
+  kicker-extras-validation:
+    needs: extract-script
+    runs-on: ubuntu-latest
+    container:
+      image: "${YAJSV_IMAGE}"
+    if: # Unable to map conditional expression to GitHub Actions equivalent
+    timeout-minutes: 60
+    env:
+      GITLAB_CI_FILES: templates/gitlab-ci-azure.yml
+      BASH_SHELLCHECK_FILES: "*.sh"
+      JSON_FILE: kicker-extras.json
+      SCHEMA_URL: "${{ github.api_url }}/projects/to-be-continuous%2Fkicker/repository/files/kicker-extras-schema-1.json/raw?ref=master"
+    steps:
+    - uses: actions/checkout@v4.1.0
+      with:
+        fetch-depth: 20
+        lfs: true
+    - uses: actions/download-artifact@v4.1.0
+    - run: |
+        set -e
+        function log_info() {
+           echo -e "[\e[1;94mINFO\e[0m] $*"
+        }
+        function log_error() {
+         echo -e "[\e[1;91mERROR\e[0m] $*" >&2
+        }
+        function install_ca_certs() {
+          certs=$1
+          if [[ -z "$certs" ]]
+          then
+            return
+          fi
+          # import in system
+          if echo "$certs" >> /etc/ssl/certs/ca-certificates.crt
+          then
+            log_info "CA certificates imported in \\e[33;1m/etc/ssl/certs/ca-certificates.crt\\e[0m"
+          fi
+          if echo "$certs" >> /etc/ssl/cert.pem
+          then
+            log_info "CA certificates imported in \\e[33;1m/etc/ssl/cert.pem\\e[0m"
+          fi
+        }
+    - run: install_ca_certs "${CUSTOM_CA_CERTS:-$DEFAULT_CA_CERTS}"
+    - run: 'wget --header "PRIVATE-TOKEN: $GITLAB_TOKEN" "$SCHEMA_URL" -O schema.json'
+    - run: yajsv -s schema.json "$JSON_FILE"
